@@ -1,0 +1,10 @@
+groups:
+  - name: shop-alerts
+    rules:
+      - alert: HighErrorRate
+        expr: sum(rate(http_requests_total{status="500"}[1m])) / sum(rate(http_requests_total[1m])) > 0.15
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Error rate above 15% for 2 minutes"
