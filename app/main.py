@@ -8,6 +8,7 @@ from opentelemetry.instrumentation.flask import FlaskInstrumentor
 import logging
 import random
 import time
+import os
 
 from flask import Flask, jsonify, request
 from pythonjsonlogger import jsonlogger
@@ -69,6 +70,10 @@ def log_request(response):
     )
     return response
 
+# ---------- Fault injection ----------
+def fault_on(name):
+    return os.path.exists(f"faults/{name}")
+
 # ---------- Endpoints ----------
 @app.route("/")
 def home():
@@ -84,7 +89,8 @@ def products():
 @app.route("/checkout")
 def checkout():
     time.sleep(random.uniform(0.1, 0.3))
-    if random.random() < 0.2:  # 20% failure
+    error_rate = 0.8 if fault_on("checkout_errors") else 0.2
+    if random.random() < error_rate:  # 20% failure
         logger.error(
             "payment_failed",
             extra={"endpoint": "/checkout", "reason": "payment gateway timeout"},
@@ -96,7 +102,8 @@ def checkout():
 @app.route("/search")
 def search():
     with tracer.start_as_current_span("search_database"):
-        if random.random() < 0.3:  # 30% slow
+        slow_rate = 0.9 if fault_on("search_slow") else 0.3
+        if random.random() < slow_rate:  # slow
             delay = random.uniform(1, 3)
             logger.warning(
                 "slow_search",
@@ -106,8 +113,6 @@ def search():
         else:
             time.sleep(random.uniform(0.05, 0.15))
     return jsonify(results=["item1", "item2"])
-
-    
 @app.route("/metrics")
 def metrics():
     return generate_latest(), 200, {"Content-Type": CONTENT_TYPE_LATEST}
