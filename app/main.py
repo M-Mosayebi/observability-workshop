@@ -1,3 +1,10 @@
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+from opentelemetry import trace
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.instrumentation.flask import FlaskInstrumentor
 import logging
 import random
 import time
@@ -6,6 +13,22 @@ from flask import Flask, jsonify, request
 from pythonjsonlogger import jsonlogger
 
 app = Flask(__name__)
+# ---------- Metrics (Prometheus) ----------
+REQUESTS = Counter(
+    "http_requests_total", "Total HTTP requests", ["endpoint", "method", "status"]
+)
+LATENCY = Histogram(
+    "http_request_duration_seconds", "Request latency in seconds", ["endpoint"]
+)
+
+# ---------- Tracing (OpenTelemetry) ----------
+provider = TracerProvider(resource=Resource.create({"service.name": "shop"}))
+provider.add_span_processor(
+    BatchSpanProcessor(OTLPSpanExporter(endpoint="http://localhost:4318/v1/traces"))
+)
+trace.set_tracer_provider(provider)
+FlaskInstrumentor().instrument_app(app)
+tracer = trace.get_tracer("shop")
 
 # ---------- Structured logging ----------
 formatter = jsonlogger.JsonFormatter(
@@ -29,18 +52,22 @@ def start_timer():
 
 @app.after_request
 def log_request(response):
-    duration_ms = round((time.time() - request.start_time) * 1000)
+    duration = time.time() - request.start_time
+    REQUESTS.labels(request.path, request.method, response.status_code).inc()
+    LATENCY.labels(request.path).observe(duration)
+
+    ctx = trace.get_current_span().get_span_context()
     logger.info(
         "request_finished",
         extra={
             "endpoint": request.path,
             "method": request.method,
             "status": response.status_code,
-            "duration_ms": duration_ms,
+            "duration_ms": round(duration * 1000),
+            "trace_id": format(ctx.trace_id, "032x"),
         },
     )
     return response
-
 
 # ---------- Endpoints ----------
 @app.route("/")
@@ -68,17 +95,22 @@ def checkout():
 
 @app.route("/search")
 def search():
-    if random.random() < 0.3:  # 30% slow
-        delay = random.uniform(1, 3)
-        logger.warning(
-            "slow_search",
-            extra={"endpoint": "/search", "delay_s": round(delay, 2)},
-        )
-        time.sleep(delay)
-    else:
-        time.sleep(random.uniform(0.05, 0.15))
+    with tracer.start_as_current_span("search_database"):
+        if random.random() < 0.3:  # 30% slow
+            delay = random.uniform(1, 3)
+            logger.warning(
+                "slow_search",
+                extra={"endpoint": "/search", "delay_s": round(delay, 2)},
+            )
+            time.sleep(delay)
+        else:
+            time.sleep(random.uniform(0.05, 0.15))
     return jsonify(results=["item1", "item2"])
 
+    
+@app.route("/metrics")
+def metrics():
+    return generate_latest(), 200, {"Content-Type": CONTENT_TYPE_LATEST}
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
